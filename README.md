@@ -139,3 +139,7 @@ src/
     differ.rs      # size + mtime change detection
     copier.rs      # chunked streaming copy with atomic rename
 ```
+
+## License
+
+Licensed under the [MIT License](LICENSE).
