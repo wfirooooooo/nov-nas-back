@@ -53,6 +53,60 @@ then atomically renames it into place. Files are never deleted on the destinatio
 
 每个任务（`source` → `dest`）会遍历源目录，用「大小 + 修改时间」（2 秒容差，兼容跨文件系统时间戳精度）与目标端逐一比对，仅复制新增或变化的文件。拷贝经全局限速以 1 MiB 分块流式进行，先写临时文件、回写原始 mtime、再原子重命名，且永不删除目标端文件。
 
+## Quick Start
+
+1. Install Rust via [rustup](https://rustup.rs), then build:
+
+   ```bash
+   cargo build --release
+   ```
+
+2. Locate your NAS shared folder's UNC path, e.g. `\\192.168.1.10\photo`.
+
+3. **Store the NAS credentials once**: open File Explorer, enter the UNC path,
+   sign in, and tick **"Remember my credentials"**. The credentials are saved to
+   Windows Credential Manager and reused automatically.
+
+4. Create `config.toml` from [`config.example.toml`](config.example.toml).
+
+5. Verify reachability:
+
+   ```bash
+   nov-nas-back check --config config.toml
+   ```
+
+6. Run the backup:
+
+   ```bash
+   nov-nas-back run --config config.toml
+   ```
+
+### 快速开始（中文）
+
+1. 通过 [rustup](https://rustup.rs) 安装 Rust，然后构建：
+
+   ```bash
+   cargo build --release
+   ```
+
+2. 找到 NAS 共享文件夹的 UNC 路径，例如 `\\192.168.1.10\photo`。
+
+3. **首次保存 NAS 凭据**：打开文件资源管理器，输入 UNC 路径，登录并勾选「记住我的凭据」。凭据会存入 Windows 凭据管理器并被自动复用。
+
+4. 参照 [`config.example.toml`](config.example.toml) 创建 `config.toml`。
+
+5. 校验可达性：
+
+   ```bash
+   nov-nas-back check --config config.toml
+   ```
+
+6. 执行备份：
+
+   ```bash
+   nov-nas-back run --config config.toml
+   ```
+
 ## Installation
 
 ```bash
@@ -74,17 +128,55 @@ cargo build --release --target x86_64-pc-windows-msvc
 ## Usage
 
 ```bash
+# Show top-level help
+nov-nas-back --help
+
+# Show help for a subcommand
+nov-nas-back run --help
+nov-nas-back check --help
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `run`   | Execute backups for all jobs, or a single job via `--job <name>`. |
+| `check` | Validate the config and source/destination reachability (for troubleshooting). |
+
+### `run` options
+
+| Option       | Default        | Description |
+|--------------|----------------|-------------|
+| `--config`   | `config.toml`  | Path to the TOML config file. |
+| `--job`      | *(all jobs)*   | Only run the job with this name. |
+
+Examples:
+
+```bash
 # Back up all jobs
 nov-nas-back run --config config.toml
 
 # Back up a single job by name
 nov-nas-back run --config config.toml --job photo
-
-# Validate config and source/destination reachability
-nov-nas-back check --config config.toml
 ```
 
 Exit code is `0` on success and non-zero on failure.
+
+### 命令（中文）
+
+| 命令 | 说明 |
+|------|------|
+| `run` | 执行全部任务，或用 `--job <name>` 仅执行单个任务。 |
+| `check` | 校验配置与源/目标路径可达性（用于排障）。 |
+
+### `run` 参数（中文）
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--config` | `config.toml` | TOML 配置文件路径。 |
+| `--job` | （全部任务） | 仅执行指定名称的任务。 |
+
+示例：
 
 ```bash
 # 备份全部任务
@@ -92,9 +184,6 @@ nov-nas-back run --config config.toml
 
 # 仅备份指定任务
 nov-nas-back run --config config.toml --job photo
-
-# 校验配置与源/目标可达性
-nov-nas-back check --config config.toml
 ```
 
 退出码：`0` 成功，非 `0` 失败。
@@ -103,6 +192,19 @@ nov-nas-back check --config config.toml
 
 See [`config.example.toml`](config.example.toml). Windows paths use single quotes
 to avoid TOML backslash escaping.
+
+### Reference
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `global.concurrency` | integer | `4` | Number of concurrent file copies. |
+| `global.rate_limit_mbps` | number | `0` | Global bandwidth throttle in MB/s; `0` means unlimited. |
+| `global.log_dir` | string | `"logs"` | Directory for rolling log files. |
+| `jobs[].name` | string | *(required)* | Job name; used by `--job` and in logs. |
+| `jobs[].source` | string | *(required)* | UNC path of the NAS shared folder. |
+| `jobs[].dest` | string | *(required)* | Local destination directory. |
+
+Example:
 
 ```toml
 [global]
@@ -116,7 +218,49 @@ source = '\\192.168.1.10\photo\2025'   # NAS shared folder (UNC)
 dest   = 'D:\backup\photo'             # local destination
 ```
 
-配置文件见 [`config.example.toml`](config.example.toml)。Windows 路径请用单引号包裹，避免 TOML 反斜杠转义。
+### 配置参考（中文）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `global.concurrency` | 整数 | `4` | 并发复制的文件数。 |
+| `global.rate_limit_mbps` | 数值 | `0` | 全局限速，单位 MB/s；`0` 表示不限速。 |
+| `global.log_dir` | 字符串 | `"logs"` | 滚动日志输出目录。 |
+| `jobs[].name` | 字符串 | （必填） | 任务名称，供 `--job` 与日志使用。 |
+| `jobs[].source` | 字符串 | （必填） | NAS 共享文件夹的 UNC 路径。 |
+| `jobs[].dest` | 字符串 | （必填） | 本地目标目录。 |
+
+示例：
+
+```toml
+[global]
+concurrency = 4          # 并发复制的文件数
+rate_limit_mbps = 20     # 全局限速，单位 MB/s；0 表示不限速
+log_dir = "logs"
+
+[[jobs]]
+name = "photo"
+source = '\\192.168.1.10\photo\2025'   # NAS 共享文件夹（UNC）
+dest   = 'D:\backup\photo'             # 本地目标目录
+```
+
+> Windows paths must be wrapped in single quotes in TOML to avoid backslash escaping.
+> Windows 路径在 TOML 中需用单引号包裹，以避免反斜杠转义。
+
+## Logging
+
+Logs are written to both the console (stderr) and a daily rolling file
+(`<log_dir>/nov-nas-back.2026-11-17.log` by default, where `<log_dir>` is
+`global.log_dir`). Set the `RUST_LOG` environment variable to control verbosity:
+
+```bash
+RUST_LOG=debug nov-nas-back run --config config.toml
+```
+
+日志同时输出到控制台（stderr）和按天滚动的文件（默认为 `<log_dir>/nov-nas-back.2026-11-17.log`，`<log_dir>` 即 `global.log_dir`）。可通过 `RUST_LOG` 环境变量控制日志级别：
+
+```bash
+RUST_LOG=debug nov-nas-back run --config config.toml
+```
 
 ## Windows Task Scheduler
 
@@ -140,6 +284,26 @@ dest   = 'D:\backup\photo'             # local destination
 
 > 使用「不管用户是否登录都要运行」时，请确保 NAS 共享凭据已保存到
 > 「控制面板 → 凭据管理器 → Windows 凭据」，以便非交互方式完成 SMB 认证。
+
+## Troubleshooting
+
+| Symptom | Likely cause & fix |
+|---------|--------------------|
+| `check` reports the source is unreachable | NAS is offline, the UNC path is wrong, or the network is unreachable. Verify `ping` and the path, then re-run `check`. |
+| `Access denied` when reading the share | The NAS credentials are missing or expired in Windows Credential Manager. Re-open `\\nas\share` in File Explorer and tick "Remember my credentials". |
+| `未找到名为 ... 的备份任务` / job not found | The `--job` value does not match any `jobs[].name` in the config. Check spelling. |
+| `.novtmp-*` files appear in the destination | Leftover temporary files from an interrupted run; they are overwritten on the next run and can be deleted manually. |
+| Want to confirm throttling works | Run with `RUST_LOG=debug` and observe the transfer rate, or monitor network throughput. |
+
+### 排障（中文）
+
+| 现象 | 可能原因与处理 |
+|------|----------------|
+| `check` 报「源不可达」 | NAS 关机、UNC 路径错误或网络不通。确认能 `ping` 通、路径正确后重新 `check`。 |
+| 读取共享时提示「拒绝访问」 | 凭据管理器中的 NAS 凭据缺失或过期。在资源管理器重新打开 `\\nas\share` 并勾选「记住我的凭据」。 |
+| 报「未找到名为 ... 的备份任务」 | `--job` 的值与配置中 `jobs[].name` 不匹配，检查拼写。 |
+| 目标目录出现 `.novtmp-*` 文件 | 中断运行遗留的临时文件，下次运行会覆盖，也可手动删除。 |
+| 想确认限速是否生效 | 用 `RUST_LOG=debug` 运行观察传输速率，或监控网络吞吐。 |
 
 ## Project layout
 
