@@ -1,7 +1,23 @@
 # nov-nas-back
 
-A lightweight, high-performance offline backup tool for Synology NAS shared folders.
-轻量、高性能的群晖 NAS 共享文件夹离线备份工具。
+[![License: MIT](https://img.shields.io/github/license/trendoverflow/nov-nas-back)](LICENSE)
+[![Rust 2024](https://img.shields.io/badge/Rust-2024%20edition-orange)](https://www.rust-lang.org/)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6)](https://github.com/trendoverflow/nov-nas-back)
+[![GitHub last commit](https://img.shields.io/github/last-commit/trendoverflow/nov-nas-back)](https://github.com/trendoverflow/nov-nas-back)
+
+A lightweight, high-performance offline backup tool that incrementally backs up
+Synology NAS shared folders to local disk on Windows.
+
+nov-nas-back reads NAS shared folders over native SMB/UNC, authenticating with
+credentials already stored in Windows Credential Manager — no extra password
+management. It performs append-only incremental backups (skipping unchanged files
+by size + mtime), throttles global bandwidth with a token bucket, and runs
+non-interactively with explicit exit codes, ready for Windows Task Scheduler.
+
+> 轻量、高性能的群晖 NAS 共享文件夹离线备份工具，在 Windows 上将 NAS 数据增量备份到本地磁盘。
+> 通过原生 SMB/UNC 访问并复用 Windows 凭据管理器已存凭据，无需额外管理密码；
+> 执行「追加式」增量备份（按大小 + 修改时间跳过未变文件），令牌桶全局限速，
+> 无交互运行、明确退出码，可直接接入 Windows 任务计划程序。
 
 ## Features
 
