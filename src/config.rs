@@ -1,5 +1,6 @@
 //! 配置加载与校验。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -85,9 +86,16 @@ impl Config {
                 "global.rate_limit_mbps 不能为负数".into(),
             ));
         }
+        let mut seen = HashSet::with_capacity(self.jobs.len());
         for job in &self.jobs {
             if job.name.trim().is_empty() {
                 return Err(ConfigError::Invalid("job.name 不能为空".into()));
+            }
+            if !seen.insert(&job.name) {
+                return Err(ConfigError::Invalid(format!(
+                    "job.name 重复: '{}'",
+                    job.name
+                )));
             }
             if job.source.as_os_str().is_empty() {
                 return Err(ConfigError::Invalid(format!(

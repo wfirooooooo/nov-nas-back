@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use filetime::FileTime;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{error, info, warn};
 use walkdir::WalkDir;
@@ -18,6 +19,10 @@ use crate::throttle::RateLimiter;
 struct WorkItem {
     src: PathBuf,
     dest: PathBuf,
+    /// 源文件大小（扫描时），用于拷贝后校验完整性。
+    size: u64,
+    /// 源文件 mtime（扫描时），用于回写，避免拷贝后重读的竞态。
+    mtime: FileTime,
 }
 
 /// 整体备份结果汇总。
@@ -134,7 +139,9 @@ impl BackupEngine {
                     let Some(item) = item else {
                         break;
                     };
-                    match copier::copy_file(&item.src, &item.dest, &limiter).await {
+                    match copier::copy_file(&item.src, &item.dest, item.size, item.mtime, &limiter)
+                        .await
+                    {
                         Ok(n) => {
                             copied.fetch_add(1, Ordering::Relaxed);
                             bytes.fetch_add(n, Ordering::Relaxed);
@@ -246,10 +253,16 @@ fn scan_source(source: &Path, dest: &Path, tx: &mpsc::Sender<WorkItem>) -> ScanS
             continue;
         }
 
+        // 仅在确定需要复制时提取元数据，作为拷贝阶段的单一数据源。
+        let size = src_meta.len();
+        let mtime = FileTime::from_last_modification_time(&src_meta);
+
         if tx
             .blocking_send(WorkItem {
                 src: path.to_path_buf(),
                 dest: dest_path,
+                size,
+                mtime,
             })
             .is_err()
         {

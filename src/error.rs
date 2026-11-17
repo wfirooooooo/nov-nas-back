@@ -25,4 +25,10 @@ pub enum BackupError {
     JobNotFound { name: String },
     #[error("备份任务 '{job}' 有 {failed} 个文件复制失败")]
     PartialFailure { job: String, failed: u64 },
+    #[error("文件 '{path}' 在拷贝期间发生变化（期望 {expected} 字节，实际读取 {actual} 字节）")]
+    FileChangedDuringCopy {
+        path: String,
+        expected: u64,
+        actual: u64,
+    },
 }
