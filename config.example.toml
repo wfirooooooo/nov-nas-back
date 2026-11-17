@@ -1,0 +1,23 @@
+# nov-nas-back 配置模板
+# 复制为 config.toml 后按需修改。
+
+[global]
+# 并发复制的文件数（默认 4）
+concurrency = 4
+# 全局限速，单位 MB/s；0 表示不限速
+rate_limit_mbps = 20
+# 滚动日志输出目录（默认 logs）
+log_dir = "logs"
+
+# 每个 [[jobs]] 定义一个备份任务（源 → 目标）。
+# 源为群晖 NAS 共享文件夹的 UNC 路径；认证使用 Windows 凭据管理器已存凭据。
+# 注意：Windows 路径请用单引号包裹，避免 TOML 反斜杠转义问题。
+[[jobs]]
+name = "photo"
+source = '\\192.168.1.10\photo\2025'
+dest   = 'D:\backup\photo'
+
+[[jobs]]
+name = "docs"
+source = '\\nas\documents'
+dest   = 'D:\backup\docs'
