@@ -1,9 +1,9 @@
 # nov-nas-back
 
-[![License: MIT](https://img.shields.io/github/license/trendoverflow/nov-nas-back)](LICENSE)
+[![License: MIT](https://img.shields.io/github/license/wfirooooooo/nov-nas-back)](LICENSE)
 [![Rust 2024](https://img.shields.io/badge/Rust-2024%20edition-orange)](https://www.rust-lang.org/)
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6)](https://github.com/trendoverflow/nov-nas-back)
-[![GitHub last commit](https://img.shields.io/github/last-commit/trendoverflow/nov-nas-back)](https://github.com/trendoverflow/nov-nas-back)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6)](https://github.com/wfirooooooo/nov-nas-back)
+[![GitHub last commit](https://img.shields.io/github/last-commit/wfirooooooo/nov-nas-back)](https://github.com/wfirooooooo/nov-nas-back)
 
 [简体中文](README.zh-CN.md)
 
