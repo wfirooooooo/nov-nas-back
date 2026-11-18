@@ -7,28 +7,50 @@
 
 [English](README.md)
 
-轻量、高性能的群晖 NAS 共享文件夹离线备份工具，在 Windows 上将 NAS 数据增量备份到本地磁盘。
+轻量、高性能的群晖 NAS 共享文件夹离线备份工具，在 Windows 上将 NAS 数据增量备份到本地磁盘，并内置防勒索能力。
 
-nov-nas-back 通过原生 SMB/UNC 读取 NAS 共享文件夹，复用 Windows 凭据管理器已存凭据完成认证，无需额外管理密码。它执行「追加式」增量备份（按大小 + 修改时间跳过未变文件），以令牌桶进行全局限速，并以无交互方式运行、给出明确退出码，可直接接入 Windows 任务计划程序。
+nov-nas-back 通过原生 SMB/UNC 读取 NAS 共享文件夹，复用 Windows 凭据管理器已存凭据完成认证，无需额外管理密码。它执行「快照式」增量备份（未变文件硬链接复用上一快照，历史版本几乎零成本），并叠加多层防勒索防护：版本化快照可回滚、变化率门禁中止大规模篡改、内容哈希捕获伪造时间戳、逐快照完整性清单。它以令牌桶进行全局限速，无交互运行、给出明确退出码，可直接接入 Windows 任务计划程序。
 
 ## 特性
 
 - **原生 SMB / UNC 访问** — 直接读取 `\\nas\share`，复用 Windows 凭据管理器已存凭据，无需单独管理密码。
-- **增量追加备份** — 按「大小 + 修改时间」跳过未变文件，仅复制新增或修改的文件，永不删除目标端多余文件。
+- **快照式增量备份** — 每次备份写入 `dest/.snapshots/` 下的新时间戳快照目录，永不原地覆盖。未变文件硬链接复用上一快照（几乎不占额外空间），仅新增或变化的文件才真正拷贝。
+- **防勒索** — 见下文[防勒索防护](#防勒索防护)。
+- **完整性校验与恢复** — `verify`、`list`、`restore` 子命令用于审计与恢复快照。
 - **全局限速** — 令牌桶限速，避免备份占满网络带宽。
 - **有界并发 + 流式拷贝** — 固定 worker 池与 1 MiB 分块流式 I/O，内存占用有上界、省系统资源。
 - **无交互 CLI** — 明确退出码，可直接接入 Windows 任务计划程序。
+
+## 防勒索防护
+
+勒索软件加密 NAS 后，若下一次增量备份「好心」地用加密数据覆盖干净副本，备份就一并被毁。nov-nas-back 在四层设防：
+
+1. **版本化快照（P0）** — 每次备份写入全新的 `dest/.snapshots/<时间戳>/` 目录，从不原地覆盖，随时可回滚到任意历史快照。
+2. **变化率门禁（P1）** — 拷贝前扫描阶段统计「已存在文件被修改」的比例，若超过 `global.change_rate_threshold`（且达到 `global.min_changed_files`），则中止备份并报 `RansomwareSuspected`，而非传播加密。
+3. **内容哈希（P2）** — 对按大小 + mtime 看似未变的文件，可进一步做采样或全量 BLAKE3 哈希复核（`global.verify`），捕获伪造时间戳的勒索软件。
+4. **完整性清单（P3）** — 每个快照生成 `manifest.json`，记录每个文件的大小与 BLAKE3 哈希。`verify` 重新哈希磁盘文件并报告不一致、缺失或多余文件。
 
 ## 工作原理
 
 ```
 ┌──────────────────────┐         UNC (SMB)          ┌─────────────────────┐
 │  Synology NAS        │ ────────────────────────▶ │  Windows (this tool) │
-│  \\nas\share\...     │   size + mtime compare    │  ──▶ local disk      │
-└──────────────────────┘   skip unchanged files    └─────────────────────┘
+│  \\nas\share\...     │   与上一快照比对          │  ──▶ local disk      │
+└──────────────────────┘   硬链接 / 拷贝           └─────────────────────┘
+                                    │
+                                    ▼
+                      dest/.snapshots/<时间戳>/
+                        ├── 未变 → 硬链接复用
+                        ├── 新增/变化 → 拷贝
+                        └── manifest.json（大小 + 哈希）
 ```
 
-每个任务（`source` → `dest`）会遍历源目录，用「大小 + 修改时间」（2 秒容差，兼容跨文件系统时间戳精度）与目标端逐一比对，仅复制新增或变化的文件。拷贝经全局限速以 1 MiB 分块流式进行，先写临时文件、回写原始 mtime、再原子重命名，且永不删除目标端文件。
+每个任务（`source` → `dest`）遍历源目录，与**上一快照**逐一比对（大小 + 修改时间，2 秒容差兼容跨文件系统时间戳精度）：
+
+- **未变** → 从上一快照硬链接复用（零额外字节）；
+- **新增或变化** → 经全局限速以 1 MiB 分块流式拷贝，先写临时文件再原子重命名。
+
+拷贝完成后向快照写入 `manifest.json`，记录每个文件的大小与 BLAKE3 哈希。旧快照按 `global.keep_snapshots` 裁剪（仅在完全成功后裁剪，失败时保留全部快照以保安全）。
 
 ## 快速开始
 
@@ -56,6 +78,13 @@ nov-nas-back 通过原生 SMB/UNC 读取 NAS 共享文件夹，复用 Windows �
    nov-nas-back run --config config.toml
    ```
 
+7. 列出快照并校验完整性：
+
+   ```bash
+   nov-nas-back list --config config.toml
+   nov-nas-back verify --config config.toml --all
+   ```
+
 ## 安装
 
 ```bash
@@ -76,7 +105,7 @@ nov-nas-back --help
 
 # 查看子命令帮助
 nov-nas-back run --help
-nov-nas-back check --help
+nov-nas-back verify --help
 ```
 
 ### 命令
@@ -85,6 +114,9 @@ nov-nas-back check --help
 |------|------|
 | `run` | 执行全部任务，或用 `--job <name>` 仅执行单个任务。 |
 | `check` | 校验配置与源/目标路径可达性（用于排障）。 |
+| `verify` | 依据清单校验快照完整性；`--all` 审计全部快照。 |
+| `list` | 列出全部（或指定 job）的快照及其文件数。 |
+| `restore` | 将指定快照恢复到目标目录。 |
 
 ### `run` 参数
 
@@ -92,6 +124,23 @@ nov-nas-back check --help
 |------|--------|------|
 | `--config` | `config.toml` | TOML 配置文件路径。 |
 | `--job` | （全部任务） | 仅执行指定名称的任务。 |
+
+### `verify` 参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--config` | `config.toml` | TOML 配置文件路径。 |
+| `--job` | （全部任务） | 仅校验指定名称的任务。 |
+| `--all` | （否） | 校验所有快照；默认仅最新。 |
+
+### `restore` 参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--config` | `config.toml` | TOML 配置文件路径。 |
+| `--job` | （必填） | 要恢复的任务名称。 |
+| `--snapshot` | （必填） | 快照目录名（时间戳，如 `20261118-090000`）。 |
+| `--target` | （必填） | 恢复目标目录。 |
 
 示例：
 
@@ -101,6 +150,19 @@ nov-nas-back run --config config.toml
 
 # 仅备份指定任务
 nov-nas-back run --config config.toml --job photo
+
+# 列出某任务的快照
+nov-nas-back list --config config.toml --job photo
+
+# 校验最新快照
+nov-nas-back verify --config config.toml --job photo
+
+# 校验所有快照
+nov-nas-back verify --config config.toml --job photo --all
+
+# 恢复指定快照
+nov-nas-back restore --config config.toml \
+  --job photo --snapshot 20261118-090000 --target D:\restore\photo
 ```
 
 退出码：`0` 成功，非 `0` 失败。
@@ -116,6 +178,10 @@ nov-nas-back run --config config.toml --job photo
 | `global.concurrency` | 整数 | `4` | 并发复制的文件数。 |
 | `global.rate_limit_mbps` | 数值 | `0` | 全局限速，单位 MB/s；`0` 表示不限速。 |
 | `global.log_dir` | 字符串 | `"logs"` | 滚动日志输出目录。 |
+| `global.keep_snapshots` | 整数 | `7` | 保留的快照数量；`0` 表示不自动裁剪。 |
+| `global.change_rate_threshold` | 数值 | `0.3` | 变化率门禁阈值；`0` 表示禁用门禁。 |
+| `global.min_changed_files` | 整数 | `100` | 门禁绝对值兜底（避免小目录误报）。 |
+| `global.verify` | 字符串 | `"sample"` | 内容校验级别：`size`、`sample` 或 `full`。 |
 | `jobs[].name` | 字符串 | （必填） | 任务名称，供 `--job` 与日志使用。 |
 | `jobs[].source` | 字符串 | （必填） | NAS 共享文件夹的 UNC 路径。 |
 | `jobs[].dest` | 字符串 | （必填） | 本地目标目录。 |
@@ -124,9 +190,13 @@ nov-nas-back run --config config.toml --job photo
 
 ```toml
 [global]
-concurrency = 4          # 并发复制的文件数
-rate_limit_mbps = 20     # 全局限速，单位 MB/s；0 表示不限速
+concurrency = 4            # 并发复制的文件数
+rate_limit_mbps = 20       # 全局限速，单位 MB/s；0 表示不限速
 log_dir = "logs"
+keep_snapshots = 7         # 保留快照数；0 表示不裁剪
+change_rate_threshold = 0.3  # 已有文件被修改比例超过 30% 则中止
+min_changed_files = 100    # 门禁绝对值兜底
+verify = "sample"          # size | sample | full
 
 [[jobs]]
 name = "photo"
@@ -161,6 +231,8 @@ RUST_LOG=debug nov-nas-back run --config config.toml
 | `check` 报「源不可达」 | NAS 关机、UNC 路径错误或网络不通。确认能 `ping` 通、路径正确后重新 `check`。 |
 | 读取共享时提示「拒绝访问」 | 凭据管理器中的 NAS 凭据缺失或过期。在资源管理器重新打开 `\\nas\share` 并勾选「记住我的凭据」。 |
 | 报「未找到名为 ... 的备份任务」 | `--job` 的值与配置中 `jobs[].name` 不匹配，检查拼写。 |
+| `run` 报「疑似勒索软件」 | 大量已有文件被修改——可能是勒索加密。排查源数据；确认安全后才可调低 `change_rate_threshold` 或设为 `0` 覆盖。 |
+| `verify` 报不一致 | 快照中的文件在备份后被改动（如被篡改/加密）。必要时从更早的快照恢复。 |
 | 目标目录出现 `.novtmp-*` 文件 | 中断运行遗留的临时文件，下次运行会覆盖，也可手动删除。 |
 | 想确认限速是否生效 | 用 `RUST_LOG=debug` 运行观察传输速率，或监控网络吞吐。 |
 
@@ -168,15 +240,21 @@ RUST_LOG=debug nov-nas-back run --config config.toml
 
 ```
 src/
-  main.rs          # CLI 入口：解析参数、加载配置、初始化日志
-  cli.rs           # clap 命令定义（run / check）
+  main.rs          # CLI 入口：解析参数、加载配置、初始化日志、分发命令
+  cli.rs           # clap 命令定义（run / check / verify / list / restore）
+  check.rs         # 任务预检（源可达、目标可写）
   config.rs        # TOML 配置加载与校验
   error.rs         # 领域错误类型（thiserror）
   throttle.rs      # 全局令牌桶限速器
   backup/
-    engine.rs      # 有界并发调度 + 汇总统计
-    differ.rs      # 大小 + mtime 变化检测
-    copier.rs      # 分块流式拷贝 + 原子替换
+    engine.rs      # 有界并发调度、变化率门禁、清单生成
+    differ.rs      # 大小 + mtime 变化检测 + 内容哈希
+    copier.rs      # 分块流式拷贝 + 硬链接降级
+    snapshot.rs    # 快照目录管理（prepare / prune / list / find）
+    manifest.rs    # 完整性清单读写 + 校验
+    restore.rs     # 将快照恢复到目标目录
+    verify.rs      # 快照校验编排
+tests/             # 集成测试（backup / check / verify / list / restore）
 ```
 
 ## License
