@@ -20,9 +20,10 @@ const TMP_PREFIX: &str = ".novtmp-";
 /// 带来的竞态：`mtime` 反映的是「本次实际拷贝的那份内容」的时间戳，而
 /// `size` 用于校验拷贝期间源文件未发生长度变化。
 ///
-/// 返回实际复制的字节数。流程：
+/// 返回实际复制的字节数与内容 BLAKE3 哈希（拷贝时顺带计算，供完整性清单复用）。
+/// 流程：
 /// 1. 确保目标父目录存在；
-/// 2. 边限速读取边写入同目录临时文件（目标不出现半成品）；
+/// 2. 边限速读取边写入同目录临时文件（目标不出现半成品），并累积哈希；
 /// 3. 校验实际拷贝字节数与 `size` 一致；
 /// 4. 回写 `mtime` 并原子重命名。
 pub async fn copy_file(
@@ -31,7 +32,7 @@ pub async fn copy_file(
     size: u64,
     mtime: FileTime,
     limiter: &RateLimiter,
-) -> Result<u64, BackupError> {
+) -> Result<(u64, blake3::Hash), BackupError> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).await?;
     }
@@ -42,6 +43,7 @@ pub async fn copy_file(
 
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut copied: u64 = 0;
+    let mut hasher = blake3::Hasher::new();
 
     loop {
         // 先申请与块等量的配额，再读取，从而在读取层面实现带宽限速。
@@ -51,6 +53,7 @@ pub async fn copy_file(
             break;
         }
         writer.write_all(&buf[..n]).await?;
+        hasher.update(&buf[..n]);
         copied += n as u64;
     }
     drop(writer); // 关闭句柄，确保 Windows 上可 rename
@@ -70,7 +73,7 @@ pub async fn copy_file(
     tokio::task::spawn_blocking(move || filetime::set_file_mtime(&tmp_for_mtime, mtime)).await??;
 
     fs::rename(&tmp, dest).await?;
-    Ok(copied)
+    Ok((copied, hasher.finalize()))
 }
 
 /// 构造与 `dest` 同目录的临时文件路径：`.novtmp-<文件名>`。
@@ -82,4 +85,40 @@ fn tmp_path(dest: &Path) -> PathBuf {
     let mut tmp = dest.to_path_buf();
     tmp.set_file_name(format!("{TMP_PREFIX}{file_name}"));
     tmp
+}
+
+/// 单次复制/链接操作的最终结果。
+#[derive(Debug, Clone, Copy)]
+pub enum CopyOutcome {
+    /// 硬链接复用上一快照，未产生实际数据传输。
+    Linked,
+    /// 实际拷贝了 `bytes` 字节，并计算得内容哈希 `hash`。
+    Copied { bytes: u64, hash: blake3::Hash },
+}
+
+/// 优先通过硬链接将上一快照文件 `prev` 复用到当前快照 `dest`；
+/// 硬链接失败（跨卷/权限/文件系统不支持）时降级为流式拷贝。
+///
+/// 返回最终采用的方式。`dest` 必须尚不存在（快照目录为新建）。
+pub async fn link_or_fallback(
+    prev: &Path,
+    dest: &Path,
+    source: &Path,
+    size: u64,
+    mtime: FileTime,
+    limiter: &RateLimiter,
+) -> Result<CopyOutcome, BackupError> {
+    let prev = prev.to_path_buf();
+    let dest_for_link = dest.to_path_buf();
+    let linked = tokio::task::spawn_blocking(move || std::fs::hard_link(&prev, &dest_for_link))
+        .await
+        .map_err(BackupError::Join)?;
+
+    match linked {
+        Ok(()) => Ok(CopyOutcome::Linked),
+        Err(_) => {
+            let (bytes, hash) = copy_file(source, dest, size, mtime, limiter).await?;
+            Ok(CopyOutcome::Copied { bytes, hash })
+        }
+    }
 }

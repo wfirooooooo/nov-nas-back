@@ -31,4 +31,36 @@ pub enum BackupError {
         expected: u64,
         actual: u64,
     },
+    #[error(
+        "疑似勒索软件：已有 {existing} 个文件中 {changed} 个被修改（{ratio:.1}%），超过阈值 {threshold:.1}%，已中止备份"
+    )]
+    RansomwareSuspected {
+        existing: u64,
+        changed: u64,
+        ratio: f64,
+        threshold: f64,
+    },
+    #[error("完整性清单序列化失败: {0}")]
+    ManifestSerde(#[from] serde_json::Error),
+    #[error("快照 '{0}' 缺少完整性清单，无法校验")]
+    MissingManifest(String),
+}
+
+/// 备份任务预检（check）相关错误。
+#[derive(Debug, thiserror::Error)]
+pub enum CheckError {
+    #[error("任务 '{job}' 源不可达: {source}")]
+    SourceUnreachable {
+        job: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("任务 '{job}' 目标不可写: {source}")]
+    DestUnwritable {
+        job: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("未找到名为 '{name}' 的备份任务")]
+    JobNotFound { name: String },
 }

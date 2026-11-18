@@ -3,5 +3,9 @@
 pub mod copier;
 pub mod differ;
 pub mod engine;
+pub mod manifest;
+pub mod restore;
+pub mod snapshot;
+pub mod verify;
 
 pub use engine::{BackupEngine, JobSummary, Summary};
