@@ -27,6 +27,7 @@ for Windows Task Scheduler.
 - **Snapshot-based incremental backup** — every run writes a new timestamped snapshot under `dest/.snapshots/`. Unchanged files are hard-linked from the previous snapshot (near-zero extra storage); only new or changed files are actually copied.
 - **Ransomware protection** — see [below](#ransomware-protection).
 - **Integrity verification & restore** — `verify`, `list`, and `restore` subcommands to audit and recover snapshots.
+- **Parallel scan** — file comparison (metadata + content hashing) runs in parallel with rayon, hiding NAS network latency over large directory trees.
 - **Global bandwidth throttle** — a token-bucket rate limiter keeps backups from saturating the network.
 - **Bounded concurrency & streaming copy** — a fixed worker pool with 1 MiB chunked streaming I/O keeps memory usage bounded and resource-friendly.
 - **Non-interactive CLI** — explicit exit codes, ready to be driven by Windows Task Scheduler.
@@ -77,6 +78,19 @@ every file against the **previous snapshot** (size + modification time, with a
 After the copy phase, a `manifest.json` is written to the snapshot recording each
 file's size and BLAKE3 hash. Old snapshots are pruned to `global.keep_snapshots`
 (only after a fully successful run; failed runs keep all snapshots).
+
+## Concurrency & performance
+
+Two independent levels of parallelism:
+
+1. **Scan** — directory traversal is serial (creates directories and collects
+   file paths), but per-file comparison (metadata + content hashing) runs in
+   parallel with [rayon](https://github.com/rayon-rs/rayon), sized to the number
+   of CPU cores. This hides NAS network latency during the most I/O-heavy phase.
+   Tune it with the `RAYON_NUM_THREADS` environment variable.
+2. **Copy** — a fixed worker pool (size `global.concurrency`, default `4`)
+   streams files in 1 MiB chunks, while a global token bucket enforces
+   `global.rate_limit_mbps`.
 
 ## Quick Start
 
