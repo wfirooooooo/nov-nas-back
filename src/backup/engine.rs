@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use filetime::FileTime;
+use rayon::prelude::*;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
@@ -349,8 +350,10 @@ async fn process_item(item: &WorkItem, limiter: &RateLimiter) -> Result<CopyOutc
 /// 将待处理文件送入 channel。
 ///
 /// 该函数在 [`tokio::task::spawn_blocking`] 中执行，内部使用同步 I/O。
-/// 采用「先收集、后门禁、再分发」两阶段：只有门禁通过才真正发送到拷贝队列，
-/// 从而在加密传染大规模发生时（大量已有文件被修改）中止备份，不清空旧快照。
+/// 采用「收集 → 并行比对 → 门禁 → 分发」四阶段：目录遍历串行（创建目录 + 收集
+/// 文件路径），随后用 rayon 并行对每个文件做元数据比对与内容哈希（I/O 密集，
+/// 并行可显著隐藏 NAS 网络延迟）。只有门禁通过才真正发送到拷贝队列，从而在
+/// 加密传染大规模发生时中止备份、不清空旧快照。
 ///
 /// 内存权衡：本函数将待处理文件（含硬链接与拷贝）缓冲在 `Vec` 中，占用约为
 /// 文件数 × 数百字节；对个人 NAS 备份规模（数万～数十万文件）可接受。
@@ -361,9 +364,8 @@ fn scan_source(
     tx: &mpsc::Sender<WorkItem>,
     cfg: &ScanConfig,
 ) -> Result<ScanStats, BackupError> {
-    let mut stats = ScanStats::default();
-    let mut items: Vec<WorkItem> = Vec::new();
-
+    // 阶段 1：串行遍历，创建目标目录并收集普通文件路径。
+    let mut file_paths: Vec<PathBuf> = Vec::new();
     for entry in WalkDir::new(source).follow_links(false) {
         let entry = match entry {
             Ok(e) => e,
@@ -379,7 +381,6 @@ fn scan_source(
         let path = entry.path();
 
         if entry.file_type().is_dir() {
-            // 同步创建当前快照目录（含空目录）。
             if let Ok(rel) = path.strip_prefix(source) {
                 let snap_sub = snap_dir.join(rel);
                 if let Err(err) = std::fs::create_dir_all(&snap_sub) {
@@ -388,70 +389,30 @@ fn scan_source(
             }
             continue;
         }
-
-        // 仅处理普通文件，跳过符号链接等其他类型。
-        if !entry.file_type().is_file() {
-            continue;
+        if entry.file_type().is_file() {
+            file_paths.push(path.to_path_buf());
         }
+    }
 
-        stats.scanned += 1;
+    // 阶段 2：并行比对每个文件（元数据 + 可选内容哈希），构造待处理项。
+    let items: Vec<WorkItem> = file_paths
+        .par_iter()
+        .filter_map(|path| compare_file(path, source, snap_dir, prev_dir, cfg.verify))
+        .collect();
 
-        let Ok(rel) = path.strip_prefix(source) else {
-            continue;
-        };
-        let dest_path = snap_dir.join(rel);
-
-        let src_meta = match std::fs::metadata(path) {
-            Ok(m) => m,
-            Err(err) => {
-                warn!(file = %path.display(), error = %err, "读取源文件元数据失败，跳过");
-                continue;
-            }
-        };
-        // 上一快照中的同名文件元数据；缺失或读取失败视为 None（保守走拷贝）。
-        let prev_path = prev_dir.map(|p| p.join(rel));
-        let prev_meta = prev_path.as_deref().and_then(|p| std::fs::metadata(p).ok());
-
-        let mut op = differ::decide(&src_meta, prev_meta.as_ref());
-        // 内容复核：元数据判定「未变」的文件，按校验级别比对内容，
-        // 捕获勒索软件伪造 mtime/size 的篡改。
-        if op == Action::Link
-            && let Some(prev_path) = prev_path.as_deref()
-        {
-            match differ::contents_match(path, prev_path, cfg.verify) {
-                Ok(true) => {}
-                Ok(false) => {
-                    debug!(file = %path.display(), "内容复核发现变化，改为拷贝");
-                    op = Action::Changed;
-                }
-                Err(err) => {
-                    warn!(file = %path.display(), error = %err, "内容复核失败，保守按已修改处理");
-                    op = Action::Changed;
-                }
-            }
-        }
-        match op {
+    // 阶段 3：汇总统计并执行变化率门禁。
+    let mut stats = ScanStats {
+        scanned: file_paths.len() as u64,
+        ..ScanStats::default()
+    };
+    for item in &items {
+        match item.op {
             Action::Link => stats.linked += 1,
             Action::New => stats.new += 1,
             Action::Changed => stats.changed += 1,
         }
-
-        // 仅在确定需要处理时提取元数据，作为处理阶段的单一数据源。
-        let size = src_meta.len();
-        let mtime = FileTime::from_last_modification_time(&src_meta);
-
-        items.push(WorkItem {
-            src: path.to_path_buf(),
-            dest: dest_path,
-            rel: rel.to_path_buf(),
-            prev: prev_path,
-            size,
-            mtime,
-            op,
-        });
     }
 
-    // 变化率门禁：仅统计「已存在文件被修改」的比例，新增不计入。
     let existing = stats.linked + stats.changed;
     if cfg.change_rate_threshold > 0.0
         && stats.changed >= cfg.min_changed_files as u64
@@ -468,7 +429,7 @@ fn scan_source(
         }
     }
 
-    // 门禁通过后分发到拷贝队列。
+    // 阶段 4：门禁通过后分发到拷贝队列。
     for item in items {
         if tx.blocking_send(item).is_err() {
             // 接收端已关闭，停止分发。
@@ -477,6 +438,61 @@ fn scan_source(
     }
 
     Ok(stats)
+}
+
+/// 比对单个源文件与上一快照，返回待处理项；无法处理时返回 `None`。
+fn compare_file(
+    path: &Path,
+    source: &Path,
+    snap_dir: &Path,
+    prev_dir: Option<&Path>,
+    verify: Verify,
+) -> Option<WorkItem> {
+    let Ok(rel) = path.strip_prefix(source) else {
+        return None;
+    };
+    let src_meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(err) => {
+            warn!(file = %path.display(), error = %err, "读取源文件元数据失败，跳过");
+            return None;
+        }
+    };
+    // 上一快照中的同名文件元数据；缺失或读取失败视为 None（保守走拷贝）。
+    let prev_path = prev_dir.map(|p| p.join(rel));
+    let prev_meta = prev_path.as_deref().and_then(|p| std::fs::metadata(p).ok());
+
+    let mut op = differ::decide(&src_meta, prev_meta.as_ref());
+    // 内容复核：元数据判定「未变」的文件，按校验级别比对内容，
+    // 捕获勒索软件伪造 mtime/size 的篡改。
+    if op == Action::Link
+        && let Some(prev_path) = prev_path.as_deref()
+    {
+        match differ::contents_match(path, prev_path, verify) {
+            Ok(true) => {}
+            Ok(false) => {
+                debug!(file = %path.display(), "内容复核发现变化，改为拷贝");
+                op = Action::Changed;
+            }
+            Err(err) => {
+                warn!(file = %path.display(), error = %err, "内容复核失败，保守按已修改处理");
+                op = Action::Changed;
+            }
+        }
+    }
+
+    let size = src_meta.len();
+    let mtime = FileTime::from_last_modification_time(&src_meta);
+
+    Some(WorkItem {
+        src: path.to_path_buf(),
+        dest: snap_dir.join(rel),
+        rel: rel.to_path_buf(),
+        prev: prev_path,
+        size,
+        mtime,
+        op,
+    })
 }
 
 #[cfg(test)]
